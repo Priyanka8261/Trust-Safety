@@ -1,0 +1,7 @@
+streamlit
+ollama>=1.0.0
+langchain
+pandas
+python-dotenv
+
+
