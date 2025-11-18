@@ -21,18 +21,32 @@ OPENAI_KEY = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") and "OPE
 try:
     from redflag_agent import classify_prompt
 except ImportError:
-    # Fallback: try importing with full path
+    # Fallback: try importing with full path (robust and defines the directory variable)
     import importlib.util
-    spec = importlib.util.spec_from_file_location("redflag_agent", app_tester_dir / "redflag_agent.py")
+
+    # define the directory where main.py lives and point to redflag_agent.py there
+    app_tester_dir = Path(__file__).resolve().parent
+    redflag_path = app_tester_dir / "redflag_agent.py"
+
+    if not redflag_path.exists():
+        raise ImportError(f"Fallback import failed: expected file not found: {redflag_path}")
+
+    spec = importlib.util.spec_from_file_location("redflag_agent", str(redflag_path))
     redflag_agent = importlib.util.module_from_spec(spec)
+    # spec.loader can be None in rare cases — guard for that
+    if spec.loader is None:
+        raise ImportError(f"Could not load module spec for {redflag_path}")
     spec.loader.exec_module(redflag_agent)
     classify_prompt = redflag_agent.classify_prompt
 
 # Load .env file from project root (optional fallback)
 project_root = Path(__file__).resolve().parent.parent
 env_path = project_root / ".env"
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path, override=True)
+if env_path.exists() and load_dotenv is not None:
+    try:
+        load_dotenv(dotenv_path=env_path, override=True)
+    except Exception:
+        pass
 
 st.set_page_config(
     page_title="AI Red-Flag Detector (Tester Version)",
@@ -163,4 +177,3 @@ if st.button("Analyze", type="primary", use_container_width=True):
 # Footer
 st.markdown("---")
 st.caption("💡 **Note:** Your API key is stored only in your browser session and is never saved or transmitted to any server except OpenAI's API.")
-
