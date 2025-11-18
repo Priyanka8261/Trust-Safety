@@ -1,7 +1,7 @@
 import os
 import sys
 import streamlit as st
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 from pathlib import Path
 
 # Add the app-tester directory to Python path
@@ -154,4 +154,5 @@ if st.button("Analyze", type="primary", use_container_width=True):
 # Footer
 st.markdown("---")
 st.caption("💡 **Note:** Your API key is stored only in your browser session and is never saved or transmitted to any server except OpenAI's API.")
+
 
