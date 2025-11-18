@@ -5,17 +5,28 @@ import os
 import re
 from typing import Any, Dict, Optional
 
-from dotenv import load_dotenv
-from pathlib import Path
-from langchain_openai import ChatOpenAI
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+# Guard dotenv import so missing python-dotenv won't crash production
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
 
-# Load .env file from project root (optional fallback)
-project_root = Path(__file__).resolve().parent.parent
+from pathlib import Path
+
+# LangChain monolith imports (compatible with `langchain` in requirements)
+from langchain.chat_models import ChatOpenAI
+from langchain.schema import HumanMessage, SystemMessage
+
+BaseChatModel = Any
+
+# Load .env from project root only if python-dotenv is available
+project_root = Path(__file__).resolve().parent
 env_path = project_root / ".env"
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path, override=True)
+if env_path.exists() and load_dotenv is not None:
+    try:
+        load_dotenv(dotenv_path=env_path, override=True)
+    except Exception:
+        pass  # continue if dotenv fails
 
 CATEGORIES = ["SAFE", "MANIPULATIVE", "UNSAFE", "OBJECTIFYING"]
 
@@ -41,27 +52,19 @@ SYSTEM_PROMPT = (
 def _get_llm(api_key: Optional[str] = None, temperature: float = 0.0, model: str = "gpt-4o-mini") -> BaseChatModel:
     """
     Create a ChatOpenAI client. Uses provided API key or falls back to environment.
-    
-    Args:
-        api_key: OpenAI API key (if None, tries to read from environment)
-        temperature: Model temperature (default: 0.0)
-        model: Model name (default: gpt-4o-mini)
-    
-    Returns:
-        ChatOpenAI client instance
     """
-    # Use provided API key, or try to get from environment
+    # prefer explicit api_key, then environment variable, then st.secrets at runtime
     if not api_key:
         api_key = os.getenv("OPENAI_API_KEY")
-    
+
     if not api_key:
         raise ValueError(
-            "OpenAI API key is required. "
-            "Please provide it in the UI or set OPENAI_API_KEY in your .env file."
+            "OpenAI API key is required. Set OPENAI_API_KEY in environment or in Streamlit secrets."
         )
-    
-    # Create ChatOpenAI client with the provided API key
-    return ChatOpenAI(model=model, temperature=temperature, api_key=api_key)
+
+    # ChatOpenAI in langchain typically accepts openai_api_key (varies by version)
+    # We pass openai_api_key to be compatible with most langchain versions
+    return ChatOpenAI(model=model, temperature=temperature, openai_api_key=api_key)
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
@@ -78,18 +81,13 @@ def _extract_json(text: str) -> Dict[str, Any]:
             return json.loads(match.group(0))
         except Exception:
             pass
-    # Fallback minimal schema
     return {"category": "SAFE", "explanation": "Unable to parse model JSON; defaulted to SAFE."}
 
 
 def _normalize_result(obj: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Ensure required keys exist and normalize category to allowed set.
-    """
     category = str(obj.get("category", "")).strip().upper()
     explanation = str(obj.get("explanation", "")).strip()
     if category not in CATEGORIES:
-        # crude mapping from common lower-case labels
         mapping = {
             "safe": "SAFE",
             "manipulative": "MANIPULATIVE",
@@ -103,52 +101,49 @@ def _normalize_result(obj: Dict[str, Any]) -> Dict[str, str]:
 
 
 def classify_prompt(
-    text: str, 
+    text: str,
     api_key: Optional[str] = None,
     model: str = "gpt-4o-mini",
     llm: Optional[BaseChatModel] = None
 ) -> Dict[str, str]:
-    """
-    Classify dating-profile text into one of the categories with a short explanation.
-
-    Parameters
-    ----------
-    text : str
-        The input text to classify.
-    api_key : Optional[str]
-        OpenAI API key. If not provided, tries to read from environment.
-    model : str
-        OpenAI model to use (default: gpt-4o-mini).
-    llm : Optional[BaseChatModel]
-        Optional injected LLM (for testing). If provided, api_key and model are ignored.
-
-    Returns
-    -------
-    Dict[str, str]
-        { "category": <SAFE|MANIPULATIVE|UNSAFE|OBJECTIFYING>, "explanation": <str> }
-    """
     if not isinstance(text, str) or not text.strip():
         return {"category": "SAFE", "explanation": "Empty input text."}
 
-    # Use provided LLM or create one with the API key
     if llm is None:
         client = _get_llm(api_key=api_key, temperature=0.0, model=model)
     else:
         client = llm
-    
+
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=text.strip()),
     ]
+
     try:
-        resp = client.invoke(messages)
-        raw = resp.content if hasattr(resp, "content") else str(resp)
+        # Many langchain ChatOpenAI clients are callable or implement .generate/.__call__
+        if callable(client):
+            resp = client(messages)
+        else:
+            # Fallback: try generate, then __call__
+            try:
+                resp = client.generate(messages)
+            except Exception:
+                resp = client.__call__(messages)
+        # Normalize several possible response shapes:
+        if isinstance(resp, str):
+            raw = resp
+        elif hasattr(resp, "generations"):
+            # typical shape: resp.generations[0][0].text
+            try:
+                raw = resp.generations[0][0].text
+            except Exception:
+                raw = str(resp)
+        elif hasattr(resp, "content"):
+            raw = resp.content
+        else:
+            raw = str(resp)
     except Exception as e:
-        return {
-            "category": "SAFE",
-            "explanation": f"Model call failed: {e}",
-        }
+        return {"category": "SAFE", "explanation": f"Model call failed: {e}"}
 
     result = _extract_json(raw)
     return _normalize_result(result)
-
